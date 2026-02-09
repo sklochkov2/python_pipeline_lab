@@ -153,6 +153,47 @@ At the start of the lab, the “boilerplate” app forwards messages without enr
 
 When rejected, the validator returns a short reason and logs a detailed reason (viewable in CloudWatch/Grafana).
 
+### Document example
+
+The following doc has all the attributes required to pass validation.
+```json
+{
+  "message_id": "msg-000001",
+  "user_id": "12345",
+  "event_ts": 1739000000,
+  "raw": {
+    "message_id": "msg-000001",
+    "user_id": "12345",
+    "event_ts": 1739000000,
+    "payload": {
+      "event_type": "page_view",
+      "page": "/pricing"
+    }
+  },
+  "enrichment": {
+    "user_id": "12345",
+    "segment": "power_user",
+    "country": "DE",
+    "city": "Berlin",
+    "age_bucket": "25-34",
+    "risk_score": 0.17,
+    "is_premium": true,
+    "interests": ["ml", "devops", "sports"],
+    "signup_ts": 1735689600,
+    "features": {
+      "has_verified_email": true,
+      "has_two_factor": false
+    }
+  },
+  "meta": {
+    "processed_at_ts": 1739000001,
+    "enrichment_source": "user-enrichment-api",
+    "enrichment_request_id": "01HXXXX",
+    "attempt": 1
+  }
+}
+```
+
 ---
 
 ## 5) What you are expected to implement in the student app
