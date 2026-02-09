@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from typing import Any, Dict
 
-from training_app.metrics import validator_latency_seconds, validator_requests_total
 from training_app.validator_client import ValidatorResponse
 
 try:
@@ -24,18 +23,12 @@ class HttpxValidatorClient:
         try:
             r = self.client.post(self.url, json=payload)
             dt = time.perf_counter() - t0
-            validator_latency_seconds.observe(dt)
 
             if 200 <= r.status_code < 300:
-                validator_requests_total.labels(outcome="ok").inc()
                 return ValidatorResponse(r.status_code, True, r.text[:2000])
             if 400 <= r.status_code < 500:
-                validator_requests_total.labels(outcome="4xx").inc()
                 return ValidatorResponse(r.status_code, False, r.text[:2000])
-            validator_requests_total.labels(outcome="5xx").inc()
             return ValidatorResponse(r.status_code, False, r.text[:2000])
         except Exception as e:
             dt = time.perf_counter() - t0
-            validator_latency_seconds.observe(dt)
-            validator_requests_total.labels(outcome="error").inc()
             return ValidatorResponse(0, False, f"exception: {type(e).__name__}: {e}")
