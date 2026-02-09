@@ -1,0 +1,39 @@
+name: Deploy student app
+
+on:
+  push:
+    branches: ["main"]
+
+concurrency:
+  group: deploy-student-app
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, student-host]
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          sudo /opt/training-lab/bin/deploy_student_app.sh "${GITHUB_SHA}"
+          /opt/training-lab/bin/notify_telegram.sh "✅ Deploy OK: ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:7}"
+
+      - name: Notify on failure with logs
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set +e
+          LOGS="$(sudo journalctl -u training-app.service -n 80 --no-pager | tail -n 80)"
+          /opt/training-lab/bin/notify_telegram.sh $'❌ Deploy FAILED: '"${GITHUB_REPOSITORY}@${GITHUB_SHA:0:7}"$'\n\nLast logs:\n'"${LOGS}"
+          exit 1

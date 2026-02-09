@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "training-app"
+version = "0.1.0"
+description = "Student app skeleton: SQS consumer + CPU simulator + validator client + Prometheus metrics"
+requires-python = ">=3.11"
+dependencies = [
+  "boto3>=1.34",
+  "prometheus-client>=0.20",
+  "requests>=2.32",
+]
+
+[project.optional-dependencies]
+httpx = [
+  "httpx>=0.27",
+]
+dev = [
+  "ruff>=0.5",
+  "pytest>=8.0",
+]
+
+[project.scripts]
+training-app = "training_app.main:main"

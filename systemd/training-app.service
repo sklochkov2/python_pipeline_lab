@@ -1,0 +1,36 @@
+[Unit]
+Description=Training Lab - Student App
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=traininglab
+Group=traininglab
+
+WorkingDirectory=/var/lib/training-lab/student-app
+
+EnvironmentFile=/opt/training-lab/etc/training-app.env
+
+# Recommended: use venv on the host (created by your deploy script), but still supports editable installs.
+ExecStart=/opt/training-lab/venv/bin/training-app
+
+Restart=always
+RestartSec=2
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+SyslogIdentifier=training-app
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/training-lab/student-app
+
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
