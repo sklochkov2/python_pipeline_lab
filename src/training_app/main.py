@@ -5,6 +5,7 @@ import logging
 import signal
 import threading
 import time
+import requests
 from typing import Any, Dict
 
 from prometheus_client import start_http_server
@@ -17,6 +18,7 @@ from training_app.validator_clients import HttpxValidatorClient, RequestsValidat
 
 log = logging.getLogger(__name__)
 
+session = requests.Session()
 
 class StopFlag:
     def __init__(self) -> None:
@@ -60,6 +62,14 @@ def _build_payload(cfg: Config, sqs_body: str, sqs_message_id: str) -> Dict[str,
         # malformed JSON; wrap it
         return {"raw_body": sqs_body[:2000], "meta": meta}
 
+def _enrich_payload(cfg: Config, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        ref = session.get(cfg.enrichment_api_url, timeout=5.0)
+        data = ref.json()
+        payload["enrichment"] = data
+    except Exception as e:
+        log.warning("enrichment_api_exception url=%s type=%s err=%s", cfg.enrichment_api_url, type(e).__name__, e)
+    return payload
 
 def main() -> None:
     cfg = Config.load()
@@ -106,7 +116,8 @@ def main() -> None:
             try:
                 payload = _build_payload(cfg, m.body, m.message_id)
                 # enrichment here 
-                
+                payload = _enrich_payload(cfg, payload)
+
                 # CPU simulation (student may replace with more sophisticated work)
                 if cfg.cpu_ms_per_message > 0:
                     # c0 = time.perf_counter() 
