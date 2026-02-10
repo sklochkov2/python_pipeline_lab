@@ -62,14 +62,15 @@ def _build_payload(cfg: Config, sqs_body: str, sqs_message_id: str) -> Dict[str,
         # malformed JSON; wrap it
         return {"raw_body": sqs_body[:2000], "meta": meta}
 
-def _enrich_payload(cfg: Config, payload: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        ref = session.get(cfg.enrichment_api_url, timeout=5.0)
-        data = ref.json()
-        payload["user"] = data['user_id']
-    except Exception as e:
-        log.warning("enrichment_api_exception url=%s type=%s err=%s", cfg.enrichment_api_url, type(e).__name__, e)
-    return payload
+# def _enrich_payload(base_url: str, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+#     try:
+#         url = base_url.rstrip("/") + f"/v1/users/{user_id}"
+#         ref = session.get(url, timeout=5.0)
+#         data = ref.json()
+#         payload["user"] = data
+#     except Exception as e:
+#         log.warning("enrichment_api_exception url=%s type=%s err=%s", url, type(e).__name__, e)
+#     return payload
 
 def main() -> None:
     cfg = Config.load()
@@ -116,7 +117,8 @@ def main() -> None:
             try:
                 payload = _build_payload(cfg, m.body, m.message_id)
                 # enrichment here 
-                payload = _enrich_payload(cfg, payload)
+                print(payload)
+                # payload = _enrich_payload(cfg.enrichment_api_url, user_id, payload)
 
                 # CPU simulation (student may replace with more sophisticated work)
                 if cfg.cpu_ms_per_message > 0:
