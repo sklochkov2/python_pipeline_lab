@@ -66,7 +66,7 @@ def _enrich_payload(cfg: Config, payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         ref = session.get(cfg.enrichment_api_url, timeout=5.0)
         data = ref.json()
-        payload["enrichment"] = data
+        payload["user"] = data['user_id']
     except Exception as e:
         log.warning("enrichment_api_exception url=%s type=%s err=%s", cfg.enrichment_api_url, type(e).__name__, e)
     return payload
