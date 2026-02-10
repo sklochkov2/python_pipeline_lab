@@ -105,7 +105,8 @@ def main() -> None:
             # t0 = time.perf_counter() not needed 
             try:
                 payload = _build_payload(cfg, m.body, m.message_id)
-
+                # enrichment here 
+                
                 # CPU simulation (student may replace with more sophisticated work)
                 if cfg.cpu_ms_per_message > 0:
                     # c0 = time.perf_counter() 

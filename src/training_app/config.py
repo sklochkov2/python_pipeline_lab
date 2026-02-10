@@ -48,6 +48,8 @@ class Config:
     # cpu simulation
     cpu_ms_per_message: int
 
+    enrichment_api_url: str
+
     # metrics
     metrics_bind: str
     metrics_port: int
@@ -61,7 +63,6 @@ class Config:
     def load() -> "Config":
         return Config(
             app_id=_getenv("APP_ID", "student-app"),
-
             sqs_queue_url=_getenv("SQS_QUEUE_URL"),
             aws_region=os.getenv("AWS_REGION"),
             receive_wait_seconds=_getenv_int("SQS_RECEIVE_WAIT_SECONDS", 10),
@@ -73,7 +74,7 @@ class Config:
             validator_client=_getenv("VALIDATOR_CLIENT", "requests"),
 
             cpu_ms_per_message=_getenv_int("CPU_MS_PER_MESSAGE", 0),
-
+            enrichment_api_url = _getenv("ENRICHMENT_API_URL"),
             metrics_bind=_getenv("METRICS_BIND", "127.0.0.1"),
             metrics_port=_getenv_int("METRICS_PORT", 9301),
 
