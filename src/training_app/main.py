@@ -68,7 +68,7 @@ def _enrich_payload(base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = base_url.rstrip("/") + f"/v1/users/{user_id}"
         ref = session.get(url, timeout=5.0)
         data = ref.json()
-        payload["user_enriched"] = data
+        payload["enriched"] = data
     except Exception as e:
         log.warning("enrichment_api_exception url=%s type=%s err=%s", url, type(e).__name__, e)
     return payload
