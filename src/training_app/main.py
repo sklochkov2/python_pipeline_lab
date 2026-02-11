@@ -69,11 +69,13 @@ def _enrich_payload(base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         ref = session.get(url, timeout=(3.05, 10))
         data = ref.json()
         payload["enriched"] = data
+        payload['expected']['country'] = data['country']
         print(f"enrichment_api url={url} user_id={user_id}")
         print(f'payload after enrichment: {payload}')
     except Exception as e:
         log.warning("enrichment_api_exception url=%s type=%s err=%s", url, type(e).__name__, e)
     return payload
+
 
 def main() -> None:
     cfg = Config.load()
