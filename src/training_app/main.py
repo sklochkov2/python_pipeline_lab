@@ -68,6 +68,7 @@ def _enrich_payload(base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = base_url.rstrip("/") + f"/v1/users/{user_id}"
         ref = session.get(url, timeout=(3.05, 10))
         data = ref.json()
+        data['tier'] = payload['expected']['tier']
         payload["enriched"] = data
         payload['expected']['country'] = data['country']
         print(f"enrichment_api url={url} user_id={user_id}")
