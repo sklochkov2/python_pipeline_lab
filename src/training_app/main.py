@@ -71,8 +71,8 @@ def _enrich_payload(base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         data['tier'] = payload['expected']['tier']
         data['country'] = payload['expected']['country']
         payload["enriched"] = data
-        print(f"enrichment_api url={url} user_id={user_id}")
-        print(f'payload after enrichment: {payload}')
+        # print(f"enrichment_api url={url} user_id={user_id}")
+        # print(f'payload after enrichment: {payload}')
     except Exception as e:
         log.warning("enrichment_api_exception url=%s type=%s err=%s", url, type(e).__name__, e)
     return payload
@@ -119,7 +119,6 @@ def main() -> None:
 
 
         for m in msgs:
-            # t0 = time.perf_counter() not needed 
             try:
                 payload = _build_payload(cfg, m.body, m.message_id)
                 # enrichment here 
@@ -127,7 +126,6 @@ def main() -> None:
 
                 # CPU simulation (student may replace with more sophisticated work)
                 if cfg.cpu_ms_per_message > 0:
-                    # c0 = time.perf_counter() 
                     cpu_burn(cfg.cpu_ms_per_message)
 
                 resp = validator.send(payload)
