@@ -11,7 +11,8 @@ dependencies = [
   "boto3>=1.34",
   "prometheus-client>=0.20",
   "requests>=2.32",
-]
+  "aiohttp>=3.13",
+  "asyncio>=3.14"]
 
 [project.optional-dependencies]
 httpx = [
