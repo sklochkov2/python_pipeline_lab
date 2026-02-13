@@ -12,7 +12,8 @@ dependencies = [
   "prometheus-client>=0.20",
   "requests>=2.32",
   "aiohttp>=3.13",
-  "asyncio>=3.14"]
+  "asyncio>=3.14",
+  "aioboto3>=15.5"]
 
 [project.optional-dependencies]
 httpx = [
