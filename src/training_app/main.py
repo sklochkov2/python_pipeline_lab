@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 class StopFlag:
     def __init__(self) -> None:
-        self._stop = threading.Event()
+        self._stop = asyncio.Event()
 
     def stop(self) -> None:
         self._stop.set()
@@ -185,5 +185,3 @@ def main() -> None:
 
     # Run the async event loop
     asyncio.run(async_main_loop(cfg, stop))
-
-
