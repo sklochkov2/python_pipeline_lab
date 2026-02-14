@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import signal
-import threading
 import time
 import aiohttp
 import asyncio
+from multiprocessing import Pool
 from typing import Any, Dict
 
 from prometheus_client import start_http_server
@@ -81,13 +81,20 @@ async def _enrich_payload(session: aiohttp.ClientSession, base_url: str, payload
     
     return payload
 
+def _cpu_work(cpu_ms: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if cpu_ms > 0:
+        cpu_burn(cpu_ms)
+    return payload
+
+
 async def _process_message(
     session: aiohttp.ClientSession,
     cfg: Config,
     validator,
     reader: SqsReader,
     m,
-    loop: asyncio.AbstractEventLoop
+    loop: asyncio.AbstractEventLoop, 
+    pool: Any
 ) -> None:
     try:
         payload = _build_payload(cfg, m.body, m.message_id)
@@ -95,26 +102,39 @@ async def _process_message(
         payload = await _enrich_payload(session, cfg.enrichment_api_url, payload)
 
         if cfg.cpu_ms_per_message > 0:
-            await loop.run_in_executor(None, cpu_burn, cfg.cpu_ms_per_message)
-
+            # Use Pool.apply_async for async-compatible multiprocessing
+            async_result = pool.apply_async(_cpu_work, (cfg.cpu_ms_per_message, payload))
+            # Wait for result in thread pool to avoid blocking event loop
+            payload = await loop.run_in_executor(None, async_result.get)
+        
 
         resp = await loop.run_in_executor(None, validator.send, payload)
 
-        if resp.ok:
-            reader.delete(m.receipt_handle)
-        else:
-            status = resp.status_code
-            if 400 <= status < 500:
-                if cfg.delete_on_4xx:
-                    reader.delete(m.receipt_handle)
-            elif 500 <= status < 600:
-                if cfg.delete_on_5xx:
-                    reader.delete(m.receipt_handle)
-            else:
-                pass
-
+        should_delete = resp.ok or \
+                       (400 <= resp.status_code < 500 and cfg.delete_on_4xx) or \
+                       (500 <= resp.status_code < 600 and cfg.delete_on_5xx)
+        
+        if should_delete:
+            await loop.run_in_executor(None, reader.delete, m.receipt_handle)
+        elif not resp.ok:
             log.info("validator_reject status=%s msg_id=%s body=%s",
-                     status, m.message_id, resp.body[:300].replace("\n", " "))
+                     resp.status_code, m.message_id, resp.body[:300].replace("\n", " "))
+    
+
+        # if resp.ok:
+        #     reader.delete(m.receipt_handle)
+        # else:
+        #     status = resp.status_code
+        #     if 400 <= status < 500:
+        #         if cfg.delete_on_4xx:
+        #             reader.delete(m.receipt_handle)
+        #     elif 500 <= status < 600:
+        #         if cfg.delete_on_5xx:
+        #             reader.delete(m.receipt_handle)
+        #     else:
+        #         pass
+            # log.info("validator_reject status=%s msg_id=%s body=%s",
+            #          status, m.message_id, resp.body[:300].replace("\n", " "))
 
     except Exception as e:
         log.exception("processing_error msg_id=%s type=%s err=%s", m.message_id, type(e).__name__, e)
@@ -127,10 +147,11 @@ async def process_messages_batch(
     validator,
     reader: SqsReader,
     msgs: list,
-    loop: asyncio.AbstractEventLoop
+    loop: asyncio.AbstractEventLoop, 
+    pool: Any
 ) -> None:
     tasks = [
-        _process_message(session, cfg, validator, reader, m, loop)
+        _process_message(session, cfg, validator, reader, m, loop, pool)
         for m in msgs
     ]
     await asyncio.gather(*tasks)
@@ -147,19 +168,29 @@ async def async_main_loop(cfg: Config, stop: StopFlag) -> None:
     validator = _make_validator_client(cfg)
     loop = asyncio.get_event_loop()
 
-    async with aiohttp.ClientSession() as session:
-        while not stop.is_set():
-            try:
-                msgs = await loop.run_in_executor(None, reader.receive)
-            except Exception as e:
-                log.warning("sqs_receive_error type=%s err=%s", type(e).__name__, e)
-                await asyncio.sleep(1.0)
-                continue
+    num_processes = None  # Defaults to CPU count
+    
+    with Pool(processes=num_processes) as pool:
+        print(f"Process pool size: {pool._processes}")
+        
+        # Create persistent aiohttp session for connection pooling
+        async with aiohttp.ClientSession() as session:
+            while not stop.is_set():
+                try:
+                    # SQS receive is synchronous - run in thread executor
+                    msgs = await loop.run_in_executor(None, reader.receive)
+                except Exception as e:
+                    log.warning("sqs_receive_error type=%s err=%s", type(e).__name__, e)
+                    await asyncio.sleep(1.0)
+                    continue
 
-            if not msgs:
-                continue
+                if not msgs:
+                    continue
 
-            await process_messages_batch(session, cfg, validator, reader, msgs, loop)
+                # Process batch with all messages concurrently
+                await process_messages_batch(
+                    session, cfg, validator, reader, msgs, loop, pool
+                )
 
     log.info("shutdown complete")
 
