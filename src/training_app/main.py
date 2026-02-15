@@ -7,7 +7,7 @@ import time
 import aiohttp
 import asyncio
 from multiprocessing import Pool
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 from prometheus_client import start_http_server
 
@@ -31,19 +31,19 @@ class StopFlag:
         return self._stop.is_set()
 
 
-def _make_validator_client(cfg: Config):
-    if cfg.validator_client.lower() == "httpx":
-        return HttpxValidatorClient(cfg.validator_url, cfg.validator_timeout_seconds)
-    return RequestsValidatorClient(cfg.validator_url, cfg.validator_timeout_seconds)
+# def _make_validator_client(cfg: Config):
+#     if cfg.validator_client.lower() == "httpx":
+#         return HttpxValidatorClient(cfg.validator_url, cfg.validator_timeout_seconds)
+#     return RequestsValidatorClient(cfg.validator_url, cfg.validator_timeout_seconds)
 
 
-def _build_payload(cfg: Config, sqs_body: str, sqs_message_id: str) -> Dict[str, Any]:
+def _build_payload(cfg_dict: Dict[str, Any], sqs_body: str, sqs_message_id: str) -> Dict[str, Any]:
     """
     Starter behaviour: pass through the original message content (parsed if possible),
-    plus some metadata. Student will later add enrichment + signature fields.
+    plus some metadata.
     """
     meta = {
-        "app_id": cfg.app_id,
+        "app_id": cfg_dict["app_id"],
         "sqs_message_id": sqs_message_id,
         "received_ts": int(time.time()),
     }
@@ -63,7 +63,6 @@ def _build_payload(cfg: Config, sqs_body: str, sqs_message_id: str) -> Dict[str,
         return {"raw_body": sqs_body[:2000], "meta": meta}
 
 
-
 async def _enrich_payload(session: aiohttp.ClientSession, base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         user_id = payload['user_id']
@@ -81,77 +80,97 @@ async def _enrich_payload(session: aiohttp.ClientSession, base_url: str, payload
     
     return payload
 
-def _cpu_work(cpu_ms: int, payload: Dict[str, Any]) -> Dict[str, Any]:
-    if cpu_ms > 0:
-        cpu_burn(cpu_ms)
-    return payload
+
+async def _process_in_worker_async(
+    cfg_dict: Dict[str, Any],
+    msg_body: str,
+    msg_id: str
+) -> Tuple[bool, int, str]:
+
+    try:
+        payload = _build_payload(cfg_dict, msg_body, msg_id)
+        
+        async with aiohttp.ClientSession() as session:
+            # Enrich
+            payload = await _enrich_payload(session, cfg_dict["enrichment_api_url"], payload)
+            
+            if cfg_dict.get("cpu_ms_per_message", 0) > 0:
+                cpu_burn(cfg_dict["cpu_ms_per_message"])
+            
+            # Validate using validator client
+            if cfg_dict["validator_client"].lower() == "httpx":
+                validator = HttpxValidatorClient(cfg_dict["validator_url"], cfg_dict["validator_timeout_seconds"])
+            else:
+                validator = RequestsValidatorClient(cfg_dict["validator_url"], cfg_dict["validator_timeout_seconds"])
+            
+            import asyncio
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(None, validator.send, payload)
+            
+            return (resp.ok, resp.status_code, "")
+    
+    except Exception as e:
+        return (False, 0, str(e))
+
+
+def _worker_wrapper(cfg_dict: Dict[str, Any], msg_body: str, msg_id: str) -> Tuple[bool, int, str]:
+    """Runs async function in worker process."""
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(_process_in_worker_async(cfg_dict, msg_body, msg_id))
+    finally:
+        loop.close()
 
 
 async def _process_message(
-    session: aiohttp.ClientSession,
     cfg: Config,
-    validator,
     reader: SqsReader,
     m,
     loop: asyncio.AbstractEventLoop, 
     pool: Any
 ) -> None:
     try:
-        payload = _build_payload(cfg, m.body, m.message_id)
+        # Prepare config dict
+        cfg_dict = {
+            "app_id": cfg.app_id,
+            "cpu_ms_per_message": cfg.cpu_ms_per_message,
+            "enrichment_api_url": cfg.enrichment_api_url,
+            "validator_url": cfg.validator_url,
+            "validator_timeout_seconds": cfg.validator_timeout_seconds,
+            "validator_client": cfg.validator_client,
+        }
         
-        payload = await _enrich_payload(session, cfg.enrichment_api_url, payload)
-
-        if cfg.cpu_ms_per_message > 0:
-            # Use Pool.apply_async for async-compatible multiprocessing
-            async_result = pool.apply_async(_cpu_work, (cfg.cpu_ms_per_message, payload))
-            # Wait for result in thread pool to avoid blocking event loop
-            payload = await loop.run_in_executor(None, async_result.get)
+        # Submit to worker
+        async_result = pool.apply_async(_worker_wrapper, (cfg_dict, m.body, m.message_id))
+        success, status_code, error_msg = await loop.run_in_executor(None, async_result.get)
         
-
-        resp = await loop.run_in_executor(None, validator.send, payload)
-
-        should_delete = resp.ok or \
-                       (400 <= resp.status_code < 500 and cfg.delete_on_4xx) or \
-                       (500 <= resp.status_code < 600 and cfg.delete_on_5xx)
+        # Handle result
+        should_delete = success or \
+                       (400 <= status_code < 500 and cfg.delete_on_4xx) or \
+                       (500 <= status_code < 600 and cfg.delete_on_5xx)
         
         if should_delete:
             await loop.run_in_executor(None, reader.delete, m.receipt_handle)
-        elif not resp.ok:
-            log.info("validator_reject status=%s msg_id=%s body=%s",
-                     resp.status_code, m.message_id, resp.body[:300].replace("\n", " "))
-    
-
-        # if resp.ok:
-        #     reader.delete(m.receipt_handle)
-        # else:
-        #     status = resp.status_code
-        #     if 400 <= status < 500:
-        #         if cfg.delete_on_4xx:
-        #             reader.delete(m.receipt_handle)
-        #     elif 500 <= status < 600:
-        #         if cfg.delete_on_5xx:
-        #             reader.delete(m.receipt_handle)
-        #     else:
-        #         pass
-            # log.info("validator_reject status=%s msg_id=%s body=%s",
-            #          status, m.message_id, resp.body[:300].replace("\n", " "))
+        elif not success and status_code > 0:
+            log.info("validator_reject status=%s msg_id=%s", status_code, m.message_id)
+        elif error_msg:
+            log.error("processing_error msg_id=%s err=%s", m.message_id, error_msg)
 
     except Exception as e:
         log.exception("processing_error msg_id=%s type=%s err=%s", m.message_id, type(e).__name__, e)
 
 
-
 async def process_messages_batch(
-    session: aiohttp.ClientSession,
     cfg: Config,
-    validator,
     reader: SqsReader,
     msgs: list,
     loop: asyncio.AbstractEventLoop, 
     pool: Any
 ) -> None:
     tasks = [
-        _process_message(session, cfg, validator, reader, m, loop, pool)
+        _process_message(cfg, reader, m, loop, pool)
         for m in msgs
     ]
     await asyncio.gather(*tasks)
@@ -165,7 +184,6 @@ async def async_main_loop(cfg: Config, stop: StopFlag) -> None:
         max_batch=cfg.max_batch,
         visibility_timeout_seconds=cfg.visibility_timeout_seconds,
     )
-    validator = _make_validator_client(cfg)
     loop = asyncio.get_event_loop()
 
     num_processes = None  # Defaults to CPU count
@@ -173,24 +191,18 @@ async def async_main_loop(cfg: Config, stop: StopFlag) -> None:
     with Pool(processes=num_processes) as pool:
         print(f"Process pool size: {pool._processes}")
         
-        # Create persistent aiohttp session for connection pooling
-        async with aiohttp.ClientSession() as session:
-            while not stop.is_set():
-                try:
-                    # SQS receive is synchronous - run in thread executor
-                    msgs = await loop.run_in_executor(None, reader.receive)
-                except Exception as e:
-                    log.warning("sqs_receive_error type=%s err=%s", type(e).__name__, e)
-                    await asyncio.sleep(1.0)
-                    continue
+        while not stop.is_set():
+            try:
+                msgs = await loop.run_in_executor(None, reader.receive)
+            except Exception as e:
+                log.warning("sqs_receive_error type=%s err=%s", type(e).__name__, e)
+                await asyncio.sleep(1.0)
+                continue
 
-                if not msgs:
-                    continue
+            if not msgs:
+                continue
 
-                # Process batch with all messages concurrently
-                await process_messages_batch(
-                    session, cfg, validator, reader, msgs, loop, pool
-                )
+            await process_messages_batch(cfg, reader, msgs, loop, pool)
 
     log.info("shutdown complete")
 
@@ -214,5 +226,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_sig)
     signal.signal(signal.SIGTERM, _handle_sig)
 
-    # Run the async event loop
     asyncio.run(async_main_loop(cfg, stop))
+
+
+    
