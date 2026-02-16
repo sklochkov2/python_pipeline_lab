@@ -121,21 +121,6 @@ async def _process_message(
                      resp.status_code, m.message_id, resp.body[:300].replace("\n", " "))
     
 
-        # if resp.ok:
-        #     reader.delete(m.receipt_handle)
-        # else:
-        #     status = resp.status_code
-        #     if 400 <= status < 500:
-        #         if cfg.delete_on_4xx:
-        #             reader.delete(m.receipt_handle)
-        #     elif 500 <= status < 600:
-        #         if cfg.delete_on_5xx:
-        #             reader.delete(m.receipt_handle)
-        #     else:
-        #         pass
-            # log.info("validator_reject status=%s msg_id=%s body=%s",
-            #          status, m.message_id, resp.body[:300].replace("\n", " "))
-
     except Exception as e:
         log.exception("processing_error msg_id=%s type=%s err=%s", m.message_id, type(e).__name__, e)
 
