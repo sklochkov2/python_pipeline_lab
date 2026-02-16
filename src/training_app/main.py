@@ -172,7 +172,9 @@ def main() -> None:
     start_http_server(cfg.metrics_port, addr=cfg.metrics_bind)
 
     # Multiprocessing primitives
-    num_workers = os.cpu_count() or 4
+    num_workers = os.cpu_count()
+    if num_workers is None:
+        num_workers = 4
     
     stop_event = Event()
     msg_queue = Queue(maxsize=1000)
