@@ -6,7 +6,7 @@ import signal
 import time
 import aiohttp
 import asyncio
-from multiprocessing import Pool
+from multiprocessing import Process, Queue, Event
 from typing import Any, Dict
 
 from prometheus_client import start_http_server
@@ -20,17 +20,6 @@ from training_app.validator_clients import HttpxValidatorClient, RequestsValidat
 log = logging.getLogger(__name__)
 
 
-class StopFlag:
-    def __init__(self) -> None:
-        self._stop = asyncio.Event()
-
-    def stop(self) -> None:
-        self._stop.set()
-
-    def is_set(self) -> bool:
-        return self._stop.is_set()
-
-
 def _make_validator_client(cfg: Config):
     if cfg.validator_client.lower() == "httpx":
         return HttpxValidatorClient(cfg.validator_url, cfg.validator_timeout_seconds)
@@ -38,10 +27,6 @@ def _make_validator_client(cfg: Config):
 
 
 def _build_payload(cfg: Config, sqs_body: str, sqs_message_id: str) -> Dict[str, Any]:
-    """
-    Starter behaviour: pass through the original message content (parsed if possible),
-    plus some metadata. Student will later add enrichment + signature fields.
-    """
     meta = {
         "app_id": cfg.app_id,
         "sqs_message_id": sqs_message_id,
@@ -56,12 +41,9 @@ def _build_payload(cfg: Config, sqs_body: str, sqs_message_id: str) -> Dict[str,
             else:
                 obj["meta"] = meta
             return obj
-        # if it's JSON but not an object, wrap it
         return {"raw": obj, "meta": meta}
     except Exception:
-        # malformed JSON; wrap it
         return {"raw_body": sqs_body[:2000], "meta": meta}
-
 
 
 async def _enrich_payload(session: aiohttp.ClientSession, base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -81,33 +63,26 @@ async def _enrich_payload(session: aiohttp.ClientSession, base_url: str, payload
     
     return payload
 
-def _cpu_work(cpu_ms: int, payload: Dict[str, Any]) -> Dict[str, Any]:
-    if cpu_ms > 0:
-        cpu_burn(cpu_ms)
-    return payload
-
 
 async def _process_message(
     session: aiohttp.ClientSession,
     cfg: Config,
     validator,
     reader: SqsReader,
-    m,
-    loop: asyncio.AbstractEventLoop, 
-    pool: Any
+    m
 ) -> None:
     try:
         payload = _build_payload(cfg, m.body, m.message_id)
         
+        # Enrich (async I/O)
         payload = await _enrich_payload(session, cfg.enrichment_api_url, payload)
 
+        # CPU work (no pool needed - runs directly in worker process)
         if cfg.cpu_ms_per_message > 0:
-            # Use Pool.apply_async for async-compatible multiprocessing
-            async_result = pool.apply_async(_cpu_work, (cfg.cpu_ms_per_message, payload))
-            # Wait for result in thread pool to avoid blocking event loop
-            payload = await loop.run_in_executor(None, async_result.get)
+            cpu_burn(cfg.cpu_ms_per_message)
         
-
+        # Validate (run in thread executor since validator.send is sync)
+        loop = asyncio.get_event_loop()
         resp = await loop.run_in_executor(None, validator.send, payload)
 
         should_delete = resp.ok or \
@@ -119,11 +94,9 @@ async def _process_message(
         elif not resp.ok:
             log.info("validator_reject status=%s msg_id=%s body=%s",
                      resp.status_code, m.message_id, resp.body[:300].replace("\n", " "))
-    
 
     except Exception as e:
         log.exception("processing_error msg_id=%s type=%s err=%s", m.message_id, type(e).__name__, e)
-
 
 
 async def process_messages_batch(
@@ -131,18 +104,17 @@ async def process_messages_batch(
     cfg: Config,
     validator,
     reader: SqsReader,
-    msgs: list,
-    loop: asyncio.AbstractEventLoop, 
-    pool: Any
+    msgs: list
 ) -> None:
+    """Process batch concurrently within worker."""
     tasks = [
-        _process_message(session, cfg, validator, reader, m, loop, pool)
+        _process_message(session, cfg, validator, reader, m)
         for m in msgs
     ]
     await asyncio.gather(*tasks)
 
 
-async def async_main_loop(cfg: Config, stop: StopFlag) -> None:
+async def async_worker_loop(cfg: Config, stop_event: Event, msg_queue: Queue) -> None:
     reader = SqsReader(
         queue_url=cfg.sqs_queue_url,
         region=cfg.aws_region,
@@ -151,33 +123,42 @@ async def async_main_loop(cfg: Config, stop: StopFlag) -> None:
         visibility_timeout_seconds=cfg.visibility_timeout_seconds,
     )
     validator = _make_validator_client(cfg)
-    loop = asyncio.get_event_loop()
-
-    num_processes = None  # Defaults to CPU count
     
-    with Pool(processes=num_processes) as pool:
-        print(f"Process pool size: {pool._processes}")
-        
-        # Create persistent aiohttp session for connection pooling
-        async with aiohttp.ClientSession() as session:
-            while not stop.is_set():
+    async with aiohttp.ClientSession() as session:
+        while not stop_event.is_set():
+            try:
+                msgs = []
                 try:
-                    # SQS receive is synchronous - run in thread executor
-                    msgs = await loop.run_in_executor(None, reader.receive)
-                except Exception as e:
-                    log.warning("sqs_receive_error type=%s err=%s", type(e).__name__, e)
-                    await asyncio.sleep(1.0)
-                    continue
-
+                    while len(msgs) < cfg.max_batch:
+                        msg = msg_queue.get_nowait()
+                        if msg is None:  # Poison pill
+                            stop_event.set()
+                            break
+                        msgs.append(msg)
+                except:
+                    pass  # Queue empty
+                
                 if not msgs:
+                    await asyncio.sleep(0.1)
                     continue
 
                 # Process batch with all messages concurrently
-                await process_messages_batch(
-                    session, cfg, validator, reader, msgs, loop, pool
-                )
+                await process_messages_batch(session, cfg, validator, reader, msgs)
 
-    log.info("shutdown complete")
+            except Exception as e:
+                log.exception("worker_error type=%s err=%s", type(e).__name__, e)
+                await asyncio.sleep(1.0)
+
+    log.info("worker shutdown complete")
+
+
+def worker_process(cfg: Config, stop_event: Event, msg_queue: Queue, worker_id: int) -> None:
+    # Setup logging for worker
+    setup_logging(cfg.log_level)
+    log.info(f"Worker {worker_id} started")
+    
+    # Create and run async event loop
+    asyncio.run(async_worker_loop(cfg, stop_event, msg_queue))
 
 
 def main() -> None:
@@ -190,14 +171,64 @@ def main() -> None:
     # Metrics endpoint
     start_http_server(cfg.metrics_port, addr=cfg.metrics_bind)
 
-    stop = StopFlag()
-
+    # Multiprocessing primitives
+    num_workers = 4
+    
+    stop_event = Event()
+    msg_queue = Queue(maxsize=1000)
+    
+    print(f"Starting {num_workers} worker processes")
+    
+    # Start worker processes
+    workers = []
+    for i in range(num_workers):
+        p = Process(target=worker_process, args=(cfg, stop_event, msg_queue, i))
+        p.start()
+        workers.append(p)
+    
+    # Setup signal handlers
     def _handle_sig(_: int, __: Any) -> None:
         log.info("signal received, stopping")
-        stop.stop()
+        stop_event.set()
+        # Send poison pills
+        for _ in range(num_workers):
+            msg_queue.put(None)
 
     signal.signal(signal.SIGINT, _handle_sig)
     signal.signal(signal.SIGTERM, _handle_sig)
+    
+    # Main process: read from SQS and distribute to workers
+    reader = SqsReader(
+        queue_url=cfg.sqs_queue_url,
+        region=cfg.aws_region,
+        wait_seconds=cfg.receive_wait_seconds,
+        max_batch=cfg.max_batch,
+        visibility_timeout_seconds=cfg.visibility_timeout_seconds,
+    )
+    
 
-    # Run the async event loop
-    asyncio.run(async_main_loop(cfg, stop))
+    while not stop_event.is_set():
+        try:
+            msgs = reader.receive()
+        except Exception as e:
+            log.warning("sqs_receive_error type=%s err=%s", type(e).__name__, e)
+            time.sleep(1.0)
+            continue
+
+        if not msgs:
+            continue
+
+        # Distribute messages to workers via queue
+        for msg in msgs:
+            msg_queue.put(msg)
+            
+    
+    # Wait for workers to finish
+    for p in workers:
+        p.join(timeout=5)
+        if p.is_alive():
+            p.terminate()
+    
+    log.info("shutdown complete")
+
+
