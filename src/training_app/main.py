@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import os
 import json
 import logging
 import signal
@@ -172,7 +172,7 @@ def main() -> None:
     start_http_server(cfg.metrics_port, addr=cfg.metrics_bind)
 
     # Multiprocessing primitives
-    num_workers = 4
+    num_workers = os.cpu_count() or 4
     
     stop_event = Event()
     msg_queue = Queue(maxsize=1000)
