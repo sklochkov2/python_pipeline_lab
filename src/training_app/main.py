@@ -66,6 +66,7 @@ def _build_payload(cfg: Config, sqs_body: str, sqs_message_id: str) -> Dict[str,
 
 
 async def _enrich_payload(session: aiohttp.ClientSession, base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    enrich_start = time.time()
     try:
         user_id = payload['user_id']
         url = base_url.rstrip("/") + f"/v1/users/{user_id}"
@@ -76,8 +77,15 @@ async def _enrich_payload(session: aiohttp.ClientSession, base_url: str, payload
             data['tier'] = payload['expected']['tier']
             data['country'] = payload['expected']['country']
             payload["enriched"] = data
+        
+        # Track success
+        enrichment_latency.observe(time.time() - enrich_start)
+        messages_enrichment_calls.labels(status='success').inc()
             
     except Exception as e:
+        # Track failure
+        enrichment_latency.observe(time.time() - enrich_start)
+        messages_enrichment_calls.labels(status='failure').inc()
         log.warning("enrichment_api_exception url=%s type=%s err=%s", url, type(e).__name__, e)
     
     return payload
