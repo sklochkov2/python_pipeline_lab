@@ -9,7 +9,9 @@ import asyncio
 from multiprocessing import Process, Queue, Event
 from typing import Any, Dict
 
-from prometheus_client import start_http_server
+# from prometheus_client import start_http_server
+from prometheus_client import multiprocess
+from prometheus_client import generate_latest, Gauge, Histogram,  CollectorRegistry, CONTENT_TYPE_LATEST, Counter
 
 from training_app.config import Config
 from training_app.cpu_load import cpu_burn
@@ -18,6 +20,22 @@ from training_app.sqs_reader import SqsReader
 from training_app.validator_clients import HttpxValidatorClient, RequestsValidatorClient
 
 log = logging.getLogger(__name__)
+
+
+messages_processed = Counter('messages_processed_total', 'Total messages processed', ['status'])
+messages_enrichment_calls = Counter('enrichment_api_calls_total', 'Total enrichment API calls', ['status'])
+enrichment_latency = Histogram('enrichment_latency_seconds', 'Enrichment API latency')
+cpu_burn_duration = Histogram('cpu_burn_duration_seconds', 'CPU burn duration')
+message_processing_duration = Histogram('message_processing_duration_seconds', 'Total message processing time')
+queue_wait_time = Histogram('queue_wait_time_seconds', 'Time message spent in SQS queue')
+validator_calls = Counter('validator_calls_total', 'Total validator API calls', ['status'])
+validator_latency = Histogram('validator_latency_seconds', 'Validator API latency')
+
+
+
+
+
+
 
 
 def _make_validator_client(cfg: Config):
@@ -71,19 +89,35 @@ async def _process_message(
     reader: SqsReader,
     m
 ) -> None:
+    msg_start = time.time()
+
     try:
+        # monitor stats for message processing start time and queue wait time (time since message was sent to SQS)
         payload = _build_payload(cfg, m.body, m.message_id)
+
+        if 'Attributes' in m.attributes and 'SentTimestamp' in m.attributes['Attributes']:
+            sent_timestamp = int(m.attributes['Attributes']['SentTimestamp']) / 1000.0
+            wait_time = time.time() - sent_timestamp
+            queue_wait_time.observe(wait_time)
         
         # Enrich (async I/O)
         payload = await _enrich_payload(session, cfg.enrichment_api_url, payload)
+        # need to monitor stats for enrichment API call count, latency, and failures
+    
 
         # CPU work (no pool needed - runs directly in worker process)
+    
+        # CPU work
         if cfg.cpu_ms_per_message > 0:
+            cpu_start = time.time()
             cpu_burn(cfg.cpu_ms_per_message)
+            cpu_burn_duration.observe(time.time() - cpu_start)
         
-        # Validate (run in thread executor since validator.send is sync)
+        # Validate
+        validator_start = time.time()
         loop = asyncio.get_event_loop()
         resp = await loop.run_in_executor(None, validator.send, payload)
+        validator_latency.observe(time.time() - validator_start)
 
         should_delete = resp.ok or \
                        (400 <= resp.status_code < 500 and cfg.delete_on_4xx) or \
@@ -91,13 +125,24 @@ async def _process_message(
         
         if should_delete:
             await loop.run_in_executor(None, reader.delete, m.receipt_handle)
-        elif not resp.ok:
+        
+        # Track metrics
+        if resp.ok:
+            messages_processed.labels(status='success').inc()
+            validator_calls.labels(status='success').inc()
+        else:
+            messages_processed.labels(status='failure').inc()
+            validator_calls.labels(status=f'{resp.status_code}').inc()
             log.info("validator_reject status=%s msg_id=%s body=%s",
                      resp.status_code, m.message_id, resp.body[:300].replace("\n", " "))
+        
+        # Total processing time
+        message_processing_duration.observe(time.time() - msg_start)
 
     except Exception as e:
+        messages_processed.labels(status='error').inc()
+        message_processing_duration.observe(time.time() - msg_start)
         log.exception("processing_error msg_id=%s type=%s err=%s", m.message_id, type(e).__name__, e)
-
 
 async def process_messages_batch(
     session: aiohttp.ClientSession,
@@ -106,7 +151,6 @@ async def process_messages_batch(
     reader: SqsReader,
     msgs: list
 ) -> None:
-    """Process batch concurrently within worker."""
     tasks = [
         _process_message(session, cfg, validator, reader, m)
         for m in msgs
@@ -161,6 +205,27 @@ def worker_process(cfg: Config, stop_event: Event, msg_queue: Queue, worker_id: 
     asyncio.run(async_worker_loop(cfg, stop_event, msg_queue))
 
 
+
+def metrics_server(registry: CollectorRegistry, port: int, bind: str):
+    """Custom metrics server that aggregates multiprocess metrics."""
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    
+    class MetricsHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/metrics':
+                self.send_response(200)
+                self.send_header('Content-Type', CONTENT_TYPE_LATEST)
+                self.end_headers()
+                self.wfile.write(generate_latest(registry))
+            else:
+                self.send_response(404)
+                self.end_headers()
+        
+    server = HTTPServer((bind, port), MetricsHandler)
+    log.info(f"Metrics server started on {bind}:{port}")
+    server.serve_forever()
+
+
 def main() -> None:
     cfg = Config.load()
     setup_logging(cfg.log_level)
@@ -169,7 +234,22 @@ def main() -> None:
              cfg.app_id, cfg.validator_client, cfg.metrics_bind, cfg.metrics_port)
 
     # Metrics endpoint
-    start_http_server(cfg.metrics_port, addr=cfg.metrics_bind)
+    # Setup Prometheus multiprocess mode
+    # This directory is used to share metrics between processes
+    prom_dir = os.environ.get('PROMETHEUS_MULTIPROC_DIR', '/tmp/prometheus_multiproc')
+    os.makedirs(prom_dir, exist_ok=True)
+    
+    # Clean up old metrics files
+    for f in os.listdir(prom_dir):
+        os.remove(os.path.join(prom_dir, f))
+    
+    # Create registry for multiprocess mode
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry)
+    
+    # Start metrics server in separate process
+    metrics_proc = Process(target=metrics_server, args=(registry, cfg.metrics_port, cfg.metrics_bind))
+    metrics_proc.start()
 
     # Multiprocessing primitives
     num_workers = os.cpu_count()
@@ -230,7 +310,9 @@ def main() -> None:
         p.join(timeout=5)
         if p.is_alive():
             p.terminate()
+
+    metrics_proc.terminate()
+    metrics_proc.join(timeout=2)
     
     log.info("shutdown complete")
-
 
