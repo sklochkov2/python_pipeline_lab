@@ -11,7 +11,7 @@ from typing import Any, Dict
 
 from prometheus_client import start_http_server
 from prometheus_client import multiprocess
-from prometheus_client import generate_latest, Gauge, Histogram,  CollectorRegistry, CONTENT_TYPE_LATEST, Counter
+from prometheus_client import generate_latest, Histogram,  CollectorRegistry, CONTENT_TYPE_LATEST, Counter
 
 from training_app.config import Config
 from training_app.cpu_load import cpu_burn
