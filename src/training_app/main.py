@@ -9,6 +9,8 @@ import asyncio
 from multiprocessing import Process, Queue, Event
 from typing import Any, Dict
 
+# instead of start_http_server, can I use this?
+from http.server import HTTPServer, BaseHTTPRequestHandler    
 from prometheus_client import start_http_server
 from prometheus_client import multiprocess
 from prometheus_client import generate_latest, Histogram,  CollectorRegistry, CONTENT_TYPE_LATEST, Counter
@@ -206,9 +208,7 @@ def worker_process(cfg: Config, stop_event: Event, msg_queue: Queue, worker_id: 
 
 
 def metrics_server(registry: CollectorRegistry, port: int, bind: str):
-    """Custom metrics server that aggregates multiprocess metrics."""
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    
+
     class MetricsHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == '/metrics':
