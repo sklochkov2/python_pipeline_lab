@@ -9,7 +9,7 @@ import asyncio
 from multiprocessing import Process, Queue, Event
 from typing import Any, Dict
 
-# from prometheus_client import start_http_server
+from prometheus_client import start_http_server
 from prometheus_client import multiprocess
 from prometheus_client import generate_latest, Gauge, Histogram,  CollectorRegistry, CONTENT_TYPE_LATEST, Counter
 
