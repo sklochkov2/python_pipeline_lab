@@ -37,7 +37,6 @@ validator_latency = Histogram('validator_latency_seconds', 'Validator API latenc
 
 
 
-
 def _make_validator_client(cfg: Config):
     if cfg.validator_client.lower() == "httpx":
         return HttpxValidatorClient(cfg.validator_url, cfg.validator_timeout_seconds)
